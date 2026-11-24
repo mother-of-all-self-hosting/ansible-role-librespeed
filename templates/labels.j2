@@ -1,0 +1,66 @@
+{#
+SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+SPDX-FileCopyrightText: 2025, 2026 Suguru Hirahara
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+{% if librespeed_container_labels_traefik_enabled %}
+traefik.enable=true
+
+{% if librespeed_container_labels_traefik_docker_network %}
+traefik.docker.network={{ librespeed_container_labels_traefik_docker_network }}
+{% endif %}
+
+{% set middlewares = [] %}
+
+{% if librespeed_container_labels_traefik_middleware_basic_auth_enabled %}
+{% set middlewares = middlewares + [librespeed_identifier + '-basic-auth'] %}
+traefik.http.middlewares.{{ librespeed_identifier }}-basic-auth.basicauth.users={{ librespeed_container_labels_traefik_middleware_basic_auth_users }}
+{% endif %}
+
+{% if librespeed_container_labels_traefik_path_prefix != '/' %}
+traefik.http.middlewares.{{ librespeed_identifier }}-slashless-redirect.redirectregex.regex=^(https?://[^/]+{{ librespeed_container_labels_traefik_path_prefix | regex_escape }})$
+traefik.http.middlewares.{{ librespeed_identifier }}-slashless-redirect.redirectregex.replacement=${1}/
+{% set middlewares = middlewares + [librespeed_identifier + '-slashless-redirect'] %}
+{% endif %}
+
+{% if librespeed_container_labels_traefik_path_prefix != '/' %}
+traefik.http.middlewares.{{ librespeed_identifier }}-strip-prefix.stripprefix.prefixes={{ librespeed_container_labels_traefik_path_prefix }}
+{% set middlewares = middlewares + [librespeed_identifier + '-strip-prefix'] %}
+{% endif %}
+
+{% if librespeed_container_labels_traefik_additional_request_headers.keys() | length > 0 %}
+{% for name, value in librespeed_container_labels_traefik_additional_request_headers.items() %}
+traefik.http.middlewares.{{ librespeed_identifier }}-add-request-headers.headers.customrequestheaders.{{ name }}={{ value }}
+{% endfor %}
+{% set middlewares = middlewares + [librespeed_identifier + '-add-request-headers'] %}
+{% endif %}
+
+{% if librespeed_container_labels_traefik_additional_response_headers.keys() | length > 0 %}
+{% for name, value in librespeed_container_labels_traefik_additional_response_headers.items() %}
+traefik.http.middlewares.{{ librespeed_identifier }}-add-response-headers.headers.customresponseheaders.{{ name }}={{ value }}
+{% endfor %}
+{% set middlewares = middlewares + [librespeed_identifier + '-add-response-headers'] %}
+{% endif %}
+
+traefik.http.routers.{{ librespeed_identifier }}.rule={{ librespeed_container_labels_traefik_rule }}
+{% if librespeed_container_labels_traefik_priority | int > 0 %}
+traefik.http.routers.{{ librespeed_identifier }}.priority={{ librespeed_container_labels_traefik_priority }}
+{% endif %}
+traefik.http.routers.{{ librespeed_identifier }}.service={{ librespeed_identifier }}
+{% if middlewares | length > 0 %}
+traefik.http.routers.{{ librespeed_identifier }}.middlewares={{ middlewares | join(',') }}
+{% endif %}
+traefik.http.routers.{{ librespeed_identifier }}.entrypoints={{ librespeed_container_labels_traefik_entrypoints }}
+traefik.http.routers.{{ librespeed_identifier }}.tls={{ librespeed_container_labels_traefik_tls | to_json }}
+{% if librespeed_container_labels_traefik_tls %}
+traefik.http.routers.{{ librespeed_identifier }}.tls.certResolver={{ librespeed_container_labels_traefik_tls_certResolver }}
+{% endif %}
+
+traefik.http.services.{{ librespeed_identifier }}.loadbalancer.server.port={{ librespeed_container_http_port }}
+{% endif %}
+
+{% for arg in librespeed_container_labels_additional_labels %}
+{{ arg }}
+{% endfor %}

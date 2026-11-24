@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: 2022 - 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Ensure LibreSpeed paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ librespeed_uid }}"
+    group: "{{ librespeed_gid }}"
+  with_items:
+    - "{{ librespeed_base_path }}"
+    - "{{ librespeed_config_path }}"
+
+# The container makes its own user (whose ID depends on the container image) the owner of this directory.
+# Do not set the owner here, as changing it would prevent the running container from writing to the database.
+- name: Ensure LibreSpeed database path exists
+  ansible.builtin.file:
+    path: "{{ librespeed_database_path }}"
+    state: directory
+    mode: "0750"
+
+- name: Ensure LibreSpeed support files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ librespeed_base_path }}/{{ item }}"
+    mode: "0640"
+    owner: "{{ librespeed_uid }}"
+    group: "{{ librespeed_gid }}"
+  with_items:
+    - env
+    - labels
+  register: librespeed_support_files_result
+
+- name: Ensure LibreSpeed configuration installed
+  ansible.builtin.copy:
+    content: "{{ item.content | to_nice_json }}"
+    dest: "{{ librespeed_config_path }}/{{ item.name }}"
+    mode: "0640"
+    owner: "{{ librespeed_uid }}"
+    group: "{{ librespeed_gid }}"
+  with_items:
+    - {"name": "settings.json", "content": "{{ librespeed_configuration }}"}
+    - {"name": "servers.json", "content": "{{ librespeed_server_list }}"}
+  register: librespeed_config_files_result
+
+- name: Ensure LibreSpeed container image is pulled via community.docker.docker_image_pull
+  when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+  community.docker.docker_image_pull:
+    name: "{{ librespeed_container_image }}"
+    pull: always
+  register: librespeed_container_image_pull_result_ansible_module
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: librespeed_container_image_pull_result_ansible_module is not failed
+
+- name: Ensure LibreSpeed container image is pulled via ansible.builtin.command
+  when: devture_systemd_docker_base_container_image_pull_method == 'command'
+  ansible.builtin.command:
+    cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ librespeed_container_image }}"
+  register: librespeed_container_image_pull_result_command
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: librespeed_container_image_pull_result_command is not failed
+  changed_when: "'Downloaded newer image' in librespeed_container_image_pull_result_command.stdout"
+
+- name: Ensure LibreSpeed container network is created via community.docker.docker_network
+  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+  community.docker.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ librespeed_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+  register: librespeed_network_creation_result
+
+- name: Ensure LibreSpeed container network is created via ansible.builtin.command
+  when: devture_systemd_docker_base_container_network_creation_method == 'command'
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} network create
+      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+      {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+      {{ librespeed_container_network }}
+  register: librespeed_network_creation_result
+  changed_when: librespeed_network_creation_result.rc == 0
+  failed_when: librespeed_network_creation_result.rc != 0 and 'already exists' not in librespeed_network_creation_result.stderr
+
+- name: Ensure LibreSpeed systemd service is present
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/librespeed.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ librespeed_identifier }}.service"
+    mode: "0644"
+  register: librespeed_systemd_service_result
+
+- name: Determine whether LibreSpeed needs a restart
+  ansible.builtin.set_fact:
+    librespeed_restart_necessary: >-
+      {{
+        librespeed_support_files_result.changed | default(false)
+        or librespeed_config_files_result.changed | default(false)
+        or librespeed_systemd_service_result.changed | default(false)
+        or librespeed_container_image_pull_result_ansible_module.changed | default(false)
+        or librespeed_container_image_pull_result_command.changed | default(false)
+      }}

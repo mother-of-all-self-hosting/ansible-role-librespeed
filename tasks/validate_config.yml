@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: 2023, 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025, 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Fail if required LibreSpeed settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item.name }}`).
+  when: "item.when | bool and lookup('vars', item.name, default='') | string | length == 0"
+  with_items:
+    - {"name": "librespeed_uid", when: true}
+    - {"name": "librespeed_gid", when: true}
+    - {"name": "librespeed_environment_variables_password", when: "{{ librespeed_environment_variables_mode != 'backend' and librespeed_environment_variables_telemetry }}"}
+    - {"name": "librespeed_environment_variables_gdpr_email", when: "{{ librespeed_environment_variables_mode != 'backend' and librespeed_environment_variables_telemetry }}"}
+    - {"name": "librespeed_environment_variables_obfuscation_salt", when: "{{ librespeed_environment_variables_mode != 'backend' and librespeed_environment_variables_telemetry and librespeed_environment_variables_enable_id_obfuscation }}"}
+
+- name: Fail if librespeed_environment_variables_mode is not valid
+  ansible.builtin.fail:
+    msg: >-
+      librespeed_environment_variables_mode (`{{ librespeed_environment_variables_mode }}`) must be one of: `standalone`, `backend`, `frontend`, `dual`.
+  when: "librespeed_environment_variables_mode not in ['standalone', 'backend', 'frontend', 'dual']"
+
+- name: Fail if there are no test servers
+  ansible.builtin.fail:
+    msg: >-
+      You need to define `librespeed_server_list_custom` or `librespeed_environment_variables_server_list_url`,
+      as LibreSpeed does not have a test server in the `{{ librespeed_environment_variables_mode }}` mode.
+  when:
+    - librespeed_environment_variables_mode != 'backend'
+    - librespeed_server_list | length == 0
+    - librespeed_environment_variables_server_list_url in ['', 'server-list.json']
+
+# The container's entrypoint puts these values into PHP files with `sed`, without escaping them.
+- name: Fail if a LibreSpeed setting contains unsupported characters
+  ansible.builtin.fail:
+    msg: >-
+      `{{ item }}` may only contain letters, digits and these characters: `_`, `.`, `-`.
+  when: "lookup('vars', item) | string is not match('^[A-Za-z0-9_.-]*$')"
+  with_items:
+    - librespeed_environment_variables_ipinfo_apikey
+    - librespeed_environment_variables_password
+
+- name: Fail if librespeed_environment_variables_obfuscation_salt is not valid
+  ansible.builtin.fail:
+    msg: >-
+      librespeed_environment_variables_obfuscation_salt must be a quoted hexadecimal number of up to 8 digits (e.g. "0x1234abcd").
+  when:
+    - librespeed_environment_variables_obfuscation_salt | string | length > 0
+    - librespeed_environment_variables_obfuscation_salt | string is not match('^0x[0-9a-fA-F]{1,8}$')
+
+- name: Run if Traefik is enabled
+  when: librespeed_container_labels_traefik_enabled | bool
+  block:
+    - name: Fail if Traefik settings required for LibreSpeed are not defined
+      ansible.builtin.fail:
+        msg: >-
+          You need to define a required configuration setting (`{{ item.name }}`).
+      when: "item.when | bool and lookup('vars', item.name, default='') | string | length == 0"
+      with_items:
+        - { "name": "librespeed_container_labels_traefik_hostname", when: true }
+        - { "name": "librespeed_container_labels_traefik_path_prefix", when: true }
+        - { "name": "librespeed_container_labels_traefik_middleware_basic_auth_users", when: "{{ librespeed_container_labels_traefik_middleware_basic_auth_enabled }}" }
+
+    # We ensure it doesn't end with a slash, because we handle both (slash and no-slash).
+    # Knowing that `librespeed_container_labels_traefik_path_prefix` does not end with a slash
+    # ensures we know how to set these routes up without having to do "does it end with a slash" checks elsewhere.
+    - name: Fail if librespeed_container_labels_traefik_path_prefix ends with a slash
+      ansible.builtin.fail:
+        msg: >-
+          librespeed_container_labels_traefik_path_prefix (`{{ librespeed_container_labels_traefik_path_prefix }}`) must either be `/` or not end with a slash (e.g. `/librespeed`).
+      when: "librespeed_container_labels_traefik_path_prefix != '/' and librespeed_container_labels_traefik_path_prefix[-1] == '/'"

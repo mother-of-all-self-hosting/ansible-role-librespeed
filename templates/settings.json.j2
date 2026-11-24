@@ -1,0 +1,17 @@
+{
+{# With a single server, the new design does not enable CORS by itself, which a server on another hostname needs. #}
+{% if librespeed_environment_variables_mode == 'frontend' or librespeed_environment_variables_server_list_url or librespeed_server_list | map(attribute='server', default='') | reject('equalto', 'backend') | list | length > 0 %}
+  "mpot": true,
+{% endif %}
+  "telemetry_level": {{ ('basic' if librespeed_environment_variables_telemetry else 'off') | to_json }},
+  "test_order": {{ librespeed_config_test_order | to_json }},
+  "time_dl_max": {{ librespeed_config_time_dl_max | to_json }},
+  "time_ul_max": {{ librespeed_config_time_ul_max | to_json }},
+  "time_auto": {{ librespeed_config_time_auto | to_json }},
+  "time_dlGraceTime": {{ librespeed_config_time_dlGraceTime | to_json }},
+  "time_ulGraceTime": {{ librespeed_config_time_ulGraceTime | to_json }},
+  "getIp_ispInfo": {{ librespeed_config_getIp_ispInfo | to_json }},
+  "getIp_ispInfo_distance": {{ librespeed_config_getIp_ispInfo_distance | to_json }},
+  "overheadCompensationFactor": {{ librespeed_config_overheadCompensationFactor | to_json }},
+  "useMebibits": {{ librespeed_config_useMebibits | to_json }}
+}

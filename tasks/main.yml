@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Perform LibreSpeed installation tasks
+  when: librespeed_enabled | bool
+  tags:
+    - setup-all
+    - setup-librespeed
+    - install-all
+    - install-librespeed
+  block:
+    - name: Validate LibreSpeed configuration
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/validate_config.yml"
+    - name: Install LibreSpeed
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/install.yml"
+
+- name: Perform LibreSpeed uninstallation tasks
+  when: not librespeed_enabled | bool
+  tags:
+    - setup-all
+    - setup-librespeed
+  block:
+    - name: Uninstall LibreSpeed
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/uninstall.yml"

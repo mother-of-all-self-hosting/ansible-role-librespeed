@@ -1,0 +1,72 @@
+{#
+SPDX-FileCopyrightText: 2023, 2026 Slavi Pantaleev
+SPDX-FileCopyrightText: 2024 Nikita Chernyi
+SPDX-FileCopyrightText: 2025 Suguru Hirahara
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+[Unit]
+Description=LibreSpeed ({{ librespeed_identifier }})
+{% for service in librespeed_systemd_required_services_list %}
+Requires={{ service }}
+After={{ service }}
+{% endfor %}
+{% for service in librespeed_systemd_wanted_services_list %}
+Wants={{ service }}
+{% endfor %}
+DefaultDependencies=no
+
+[Service]
+Type=simple
+Environment="HOME={{ devture_systemd_docker_base_systemd_unit_home_path }}"
+ExecStartPre={{ devture_systemd_docker_base_host_command_sh }} -c '{{ librespeed_container_cleanup_command | trim | replace("\n", " ") }}'
+
+{#
+  The container's entrypoint needs to run as root with a writable filesystem: it prepares the web root,
+  edits Apache's configuration and changes the files' owner, after which Apache switches to its own user.
+  See: https://github.com/librespeed/speedtest/blob/master/docker/entrypoint.sh
+#}
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} create \
+      --rm \
+      --name={{ librespeed_identifier }} \
+      --log-driver=none \
+      --cap-drop=ALL \
+      --cap-add=CHOWN \
+      --cap-add=DAC_OVERRIDE \
+      --cap-add=FOWNER \
+      --cap-add=SETGID \
+      --cap-add=SETUID \
+      --network={{ librespeed_container_network }} \
+      {% if librespeed_container_http_host_bind_port %}
+      -p {{ librespeed_container_http_host_bind_port }}:{{ librespeed_container_http_port }} \
+      {% endif %}
+      --env-file={{ librespeed_base_path }}/env \
+      --label-file={{ librespeed_base_path }}/labels \
+      --mount type=bind,src={{ librespeed_config_path }}/settings.json,dst=/speedtest/settings.json,ro \
+      --mount type=bind,src={{ librespeed_config_path }}/servers.json,dst=/servers.json,ro \
+      --mount type=bind,src={{ librespeed_database_path }},dst=/database \
+      {% for volume in librespeed_container_additional_volumes %}
+      --mount type={{ volume.type | default('bind' if '/' in volume.src else 'volume') }},src={{ volume.src }},dst={{ volume.dst }}{{ (',' + volume.options) if volume.options | default('') else '' }} \
+      {% endfor %}
+      --tmpfs=/tmp:rw,noexec,nosuid,size={{ librespeed_container_tmpfs_tmp_size }} \
+      {% for arg in librespeed_container_extra_arguments %}
+      {{ arg }} \
+      {% endfor %}
+      {{ librespeed_container_image }}
+
+{% for network in librespeed_container_additional_networks %}
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} network connect {{ network }} {{ librespeed_identifier }}
+{% endfor %}
+
+ExecStart={{ devture_systemd_docker_base_host_command_docker }} start --attach {{ librespeed_identifier }}
+
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} stop -t {{ librespeed_container_stop_grace_time_seconds }} {{ librespeed_identifier }} 2>/dev/null || true'
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} rm {{ librespeed_identifier }} 2>/dev/null || true'
+
+Restart=always
+RestartSec=30
+SyslogIdentifier={{ librespeed_identifier }}
+
+[Install]
+WantedBy=multi-user.target

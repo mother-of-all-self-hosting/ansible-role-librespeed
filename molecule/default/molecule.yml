@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 spatterlight
+# SPDX-FileCopyrightText: 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: requirements.yml
+    force: true
+driver:
+  name: docker
+platforms:
+  - name: librespeed-${MOLECULE_DISTRO:-ubuntu2604}-default
+    image: "geerlingguy/docker-${MOLECULE_DISTRO:-ubuntu2604}-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Docker inside the instance stores images via containerd. Its storage
+      # cannot use overlay on top of the instance's own overlay filesystem, so a
+      # volume puts it on a real filesystem.
+      - /var/lib/containerd
+    # Remove volumes along with the instance, so that local runs do not leave
+    # gigabytes behind.
+    keep_volumes: false
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      callback_result_format: yaml
+  inventory:
+    group_vars:
+      all:
+        # Helper variables
+        librespeed_debug_service_enabled: false
+        librespeed_restarts_check_enabled: true
+
+        # A file which the prepare playbook creates, to be mounted over one of the container image's.
+        librespeed_molecule_logo_path: /librespeed-molecule-logo.svg
+        librespeed_molecule_logo_content: "<svg xmlns='http://www.w3.org/2000/svg'><!-- molecule-logo-7f3ac91b --></svg>"
+
+        # Variables for LibreSpeed
+        librespeed_uid: 1000
+        librespeed_gid: 1000
+        librespeed_scheme: http
+        librespeed_hostname: localhost
+        librespeed_container_labels_traefik_enabled: false
+        librespeed_container_http_host_bind_port: 8080
+        librespeed_container_additional_volumes_custom:
+          - type: bind
+            src: "{{ librespeed_molecule_logo_path }}"
+            dst: /speedtest/frontend/images/logo.svg
+            options: readonly
+
+        # Deliberately non-default, so that observing them proves the role's
+        # templates reached the process rather than LibreSpeed's own fallbacks.
+        # The characters are ones which are special to HTML, `sed` or env files.
+        librespeed_environment_variables_title: "Molecule's <Speed> & \"Test\" / more"
+        librespeed_environment_variables_telemetry: true
+        librespeed_environment_variables_password: molecule-password_4f2a.9c
+        librespeed_environment_variables_gdpr_email: molecule@example.com
+        librespeed_environment_variables_enable_id_obfuscation: true
+        librespeed_environment_variables_obfuscation_salt: "0x1234abcd"
+        librespeed_environment_variables_use_new_design: true
+        librespeed_config_time_dl_max: 7
+        librespeed_config_time_auto: true
+        librespeed_config_time_dlGraceTime: 1.5
+        librespeed_config_overheadCompensationFactor: 1
+        librespeed_configuration_extension_json: |
+          {
+            "time_ul_max": 8,
+            "count_ping": 5
+          }
+  env:
+    # Workaround for https://github.com/ansible/molecule/issues/4391
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/..:/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles:~/.ansible/roles
+verifier:
+  name: ansible

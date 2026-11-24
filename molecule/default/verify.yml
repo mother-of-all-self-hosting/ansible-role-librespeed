@@ -1,0 +1,392 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 spatterlight
+# SPDX-FileCopyrightText: 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+# What this suite is guarding against: see `../README.md`.
+
+- name: Verify LibreSpeed
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    librespeed_molecule_base_url: http://127.0.0.1:8080
+    librespeed_molecule_data_path: /tmp/librespeed-molecule-data
+    librespeed_molecule_download_speed: "4815.16"
+    librespeed_molecule_expected_image: "{{ librespeed_defaults.librespeed_container_image_registry_prefix_upstream_default }}librespeed/speedtest:{{ librespeed_defaults.librespeed_version }}-alpine"
+    librespeed_molecule_expected_settings:
+      telemetry_level: basic
+      test_order: ID_U_P
+      time_dl_max: 7
+      time_ul_max: 8
+      time_auto: true
+      time_dlGraceTime: 1.5
+      time_ulGraceTime: 0
+      getIp_ispInfo: true
+      getIp_ispInfo_distance: km
+      overheadCompensationFactor: 1
+      useMebibits: false
+      count_ping: 5
+
+    librespeed_verify_units:
+      - librespeed.service
+
+  tasks:
+    - name: Verify that LibreSpeed works
+      block:
+        # The role is not included in this playbook, so its defaults are not in
+        # scope. Reading defaults/main.yml directly ties the version assertion
+        # below.
+        - name: Load the role defaults
+          ansible.builtin.include_vars:
+            file: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/defaults/main.yml"
+            name: librespeed_defaults
+
+        - name: Wait for the LibreSpeed systemd services to become active (up to 180s each)
+          ansible.builtin.systemd_service:
+            name: "{{ item }}"
+          register: librespeed_services
+          until: librespeed_services.status.ActiveState == 'active'
+          retries: 36
+          delay: 5
+          loop: "{{ librespeed_verify_units }}"
+          # So that giving up is reported by the assertion below rather than as a
+          # wall of systemd unit properties.
+          failed_when: false
+
+        # `Restart=always` in the systemd unit means that even a container which crashes
+        # and gets restarted reads as active here, so this is a precondition rather than
+        # a result.
+        - name: Assert the LibreSpeed systemd services are active
+          ansible.builtin.assert:
+            that: librespeed_services.results | map(attribute='status.ActiveState') | unique | list == ['active']
+            fail_msg: >-
+              Not every service is active:
+              {{ dict(librespeed_verify_units | zip(librespeed_services.results | map(attribute='status.ActiveState'))) }}
+            success_msg: "Every systemd service is active"
+
+        - name: Retrieve the LibreSpeed systemd services log for debugging
+          when: librespeed_debug_service_enabled | bool
+          ansible.builtin.command:
+            cmd: "journalctl --no-pager --output=cat --unit={{ item }}"
+          changed_when: false
+          loop: "{{ librespeed_verify_units }}"
+
+        # ------------------------------------------------------------------
+        # The container the role actually started
+        # ------------------------------------------------------------------
+
+        - name: Inspect the running LibreSpeed container
+          ansible.builtin.command:
+            cmd: docker container inspect librespeed
+          register: librespeed_container_raw
+          changed_when: false
+
+        - name: Parse the LibreSpeed container inspection
+          ansible.builtin.set_fact:
+            librespeed_container: "{{ (librespeed_container_raw.stdout | from_json)[0] }}"
+
+        - name: Assert the running LibreSpeed is the version this role installs
+          ansible.builtin.assert:
+            that:
+              - librespeed_container.State.Running
+              - librespeed_container.Config.Image == librespeed_molecule_expected_image
+            fail_msg: "The container runs {{ librespeed_container.Config.Image }}, expected {{ librespeed_molecule_expected_image }}"
+            success_msg: "The container runs {{ librespeed_container.Config.Image }}"
+
+        - name: Assert the LibreSpeed container has only the privileges the systemd unit asks for
+          ansible.builtin.assert:
+            that:
+              - not librespeed_container.HostConfig.Privileged
+              - librespeed_container.HostConfig.CapDrop == ['ALL']
+              - librespeed_container.HostConfig.CapAdd | map('regex_replace', '^CAP_', '') | sort == ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID']
+            fail_msg: "Unexpected privileges: {{ librespeed_container.HostConfig.CapAdd }}, dropped: {{ librespeed_container.HostConfig.CapDrop }}"
+            success_msg: "The container has only the expected capabilities"
+
+        - name: Assert the LibreSpeed container has its temporary directory in memory
+          ansible.builtin.assert:
+            that: "'size=' ~ librespeed_defaults.librespeed_container_tmpfs_tmp_size in librespeed_container.HostConfig.Tmpfs['/tmp']"
+            fail_msg: "Unexpected tmpfs volumes: {{ librespeed_container.HostConfig.Tmpfs }}"
+            success_msg: "The container has its temporary directory in memory"
+
+        # ------------------------------------------------------------------
+        # The configuration this role rendered, as the browser receives it
+        # ------------------------------------------------------------------
+
+        - name: Wait for the LibreSpeed page to be served (up to 180s)
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/index-modern.html"
+            return_content: true
+          register: librespeed_index
+          until: librespeed_index.status == 200
+          retries: 36
+          delay: 5
+
+        - name: Assert the LibreSpeed page carries the configured title
+          ansible.builtin.assert:
+            that: "('<h1>' ~ (librespeed_environment_variables_title | replace('&', '&amp;') | replace('<', '&lt;') | replace('>', '&gt;') | replace('\"', '&quot;') | replace(\"'\", '&#39;')) ~ '</h1>') in librespeed_index.content"
+            fail_msg: "The page does not carry the configured title: {{ librespeed_index.content }}"
+            success_msg: "The page carries the configured title"
+
+        - name: Request the LibreSpeed configuration
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/settings.json"
+          register: librespeed_served_settings
+
+        # The container image's own `settings.json` is served at this very path too.
+        - name: Assert the served LibreSpeed configuration is the configured one
+          ansible.builtin.assert:
+            that: librespeed_served_settings.json == librespeed_molecule_expected_settings
+            fail_msg: "The served configuration is {{ librespeed_served_settings.json }}, expected {{ librespeed_molecule_expected_settings }}"
+            success_msg: "The served configuration is the configured one, including the extension"
+
+        - name: Request the LibreSpeed server list
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/server-list.json"
+          register: librespeed_served_server_list
+
+        # The list which the container image generates by itself has an absolute `/backend`, which breaks under a subpath.
+        - name: Assert the served LibreSpeed server list has only the instance itself, relatively
+          ansible.builtin.assert:
+            that: librespeed_served_server_list.json | map(attribute='server') | list == ['backend']
+            fail_msg: "The served list is {{ librespeed_served_server_list.json }}"
+            success_msg: "The served list has only the instance itself"
+
+        - name: Request the LibreSpeed design preference
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/config.json"
+          register: librespeed_served_design
+
+        - name: Assert LibreSpeed prefers the new design
+          ansible.builtin.assert:
+            that: librespeed_served_design.json.useNewDesign
+            fail_msg: "The new design is not the preferred one: {{ librespeed_served_design.json }}"
+            success_msg: "The new design is the preferred one"
+
+        - name: Request the LibreSpeed logo
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/frontend/images/logo.svg"
+            return_content: true
+          register: librespeed_served_logo
+
+        - name: Assert the served LibreSpeed logo is the mounted one
+          ansible.builtin.assert:
+            that: librespeed_served_logo.content == librespeed_molecule_logo_content
+            fail_msg: "The served logo is {{ librespeed_served_logo.content }}"
+            success_msg: "The served logo is the mounted one"
+
+        # ------------------------------------------------------------------
+        # What a speed test does
+        # ------------------------------------------------------------------
+
+        - name: Download test data from LibreSpeed
+          ansible.builtin.get_url:
+            url: "{{ librespeed_molecule_base_url }}/backend/garbage.php?ckSize=20"
+            dest: "{{ librespeed_molecule_data_path }}"
+            mode: "0640"
+          register: librespeed_download
+
+        - name: Assert LibreSpeed served the requested amount of test data
+          ansible.builtin.assert:
+            that: librespeed_download.size == 20 * 1024 * 1024
+            fail_msg: "Downloaded {{ librespeed_download.size }} bytes"
+            success_msg: "Downloaded {{ librespeed_download.size }} bytes"
+
+        # As much as the web interface uploads in a single request. The web interface does not specify a content type.
+        # With one, PHP also buffers the data in `/tmp`.
+        - name: Upload test data to LibreSpeed
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/backend/empty.php"
+            method: POST
+            src: "{{ librespeed_molecule_data_path }}"
+            remote_src: true
+            headers:
+              Content-Type: application/octet-stream
+            return_content: true
+          register: librespeed_upload
+
+        - name: Assert LibreSpeed accepted the test data
+          ansible.builtin.assert:
+            that:
+              - librespeed_upload.status == 200
+              - librespeed_upload.content | length == 0
+            fail_msg: "The upload was not accepted ({{ librespeed_upload.status }}): {{ librespeed_upload.content }}"
+            success_msg: "The upload was accepted"
+
+        - name: Remove the test data
+          ansible.builtin.file:
+            path: "{{ librespeed_molecule_data_path }}"
+            state: absent
+
+        # PHP discards data which it has no room or permission for with a warning, but still runs the script.
+        - name: Read the LibreSpeed systemd service log
+          ansible.builtin.command:
+            cmd: journalctl --no-pager --output=cat --unit=librespeed.service
+          register: librespeed_upload_log
+          changed_when: false
+
+        - name: Assert PHP did not discard the test data
+          ansible.builtin.assert:
+            that: "'PHP Warning' not in librespeed_upload_log.stdout"
+            fail_msg: "PHP reported warnings: {{ librespeed_upload_log.stdout }}"
+            success_msg: "PHP reported no warnings"
+
+        # A reverse proxy passes the client's IP address in this header.
+        - name: Request the client's IP address and ISP
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/backend/getIP.php?isp=true"
+            headers:
+              X-Forwarded-For: 8.8.8.8
+          register: librespeed_client_ip
+
+        - name: Assert LibreSpeed determined the client's IP address and ISP
+          ansible.builtin.assert:
+            that: librespeed_client_ip.json.processedString is match('8\.8\.8\.8 - .')
+            fail_msg: "LibreSpeed reports {{ librespeed_client_ip.json }}"
+            success_msg: "LibreSpeed reports {{ librespeed_client_ip.json.processedString }}"
+
+        # ------------------------------------------------------------------
+        # Saving results
+        # ------------------------------------------------------------------
+
+        - name: Submit a test result
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/results/telemetry.php"
+            method: POST
+            body_format: form-urlencoded
+            body:
+              extra: ""
+              ispinfo: "{}"
+              dl: "{{ librespeed_molecule_download_speed }}"
+              ul: "100"
+              ping: "1"
+              jitter: "1"
+              log: ""
+            return_content: true
+          register: librespeed_result
+
+        # 1 is the first result's ID without obfuscation.
+        - name: Assert LibreSpeed saved the test result under an obfuscated ID
+          ansible.builtin.assert:
+            that:
+              - librespeed_result.content is match('id [0-9a-z]{7}$')
+              - librespeed_result.content != 'id 0000001'
+            fail_msg: "The result was not saved: {{ librespeed_result.content }}"
+            success_msg: "The result was saved as {{ librespeed_result.content }}"
+
+        # Without a configured salt, LibreSpeed generates one.
+        - name: Read the salt which LibreSpeed uses
+          ansible.builtin.command:
+            cmd: docker exec librespeed cat /var/www/html/results/idObfuscation_salt.php
+          register: librespeed_salt
+          changed_when: false
+
+        - name: Assert LibreSpeed uses the configured salt
+          ansible.builtin.assert:
+            that: librespeed_environment_variables_obfuscation_salt in librespeed_salt.stdout
+            fail_msg: "LibreSpeed uses another salt: {{ librespeed_salt.stdout }}"
+            success_msg: "LibreSpeed uses the configured salt"
+
+        - name: Check for the database on the host
+          ansible.builtin.stat:
+            path: /librespeed/database/db.sql
+          register: librespeed_database
+
+        - name: Assert the database is on the host
+          ansible.builtin.assert:
+            that:
+              - librespeed_database.stat.exists
+              - librespeed_database.stat.size > 0
+            fail_msg: "The database is not on the host"
+            success_msg: "The database is on the host"
+
+        - name: Log in to the LibreSpeed stats page
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/results/stats.php?op=login"
+            method: POST
+            body_format: form-urlencoded
+            body:
+              password: "{{ item }}"
+            follow_redirects: none
+            return_content: true
+          register: librespeed_logins
+          loop:
+            - password
+            - "{{ librespeed_environment_variables_password }}"
+
+        - name: Request the LibreSpeed stats page
+          ansible.builtin.uri:
+            url: "{{ librespeed_molecule_base_url }}/results/stats.php"
+            headers:
+              Cookie: "{{ item.cookies_string }}"
+            return_content: true
+          register: librespeed_stats
+          loop: "{{ librespeed_logins.results }}"
+          loop_control:
+            label: "{{ item.cookies_string }}"
+
+        - name: Assert the LibreSpeed stats page shows the result only with the configured password
+          ansible.builtin.assert:
+            that:
+              - librespeed_molecule_download_speed not in librespeed_stats.results[0].content
+              - librespeed_molecule_download_speed in librespeed_stats.results[1].content
+            fail_msg: "Unexpected stats pages: {{ librespeed_stats.results | map(attribute='content') }}"
+            success_msg: "The stats page shows the result only with the configured password"
+
+        - name: Verify nothing was quietly restarting while all of that was being checked
+          when: "librespeed_restarts_check_enabled | bool"
+          block:
+            # `Restart=always` means the unit reads `active` while it is crash-looping,
+            # so `active` on its own says very little. The window has to be watched with
+            # everything already answering.
+            - name: Sample the restart counters
+              ansible.builtin.systemd_service:
+                name: "{{ item }}"
+              register: librespeed_restarts_before
+              loop: "{{ librespeed_verify_units }}"
+
+            # Comfortably longer than the unit's `RestartSec=30`, so a crash loop has to
+            # tick at least once inside the window.
+            - name: Watch the services for 45 seconds
+              ansible.builtin.pause:
+                seconds: 45
+
+            - name: Sample the restart counters again
+              ansible.builtin.systemd_service:
+                name: "{{ item }}"
+              register: librespeed_restarts_after
+              loop: "{{ librespeed_verify_units }}"
+
+            - name: Assert no service restarted while it was up
+              ansible.builtin.assert:
+                that:
+                  - librespeed_restarts_after.results | map(attribute='status.NRestarts') | list == librespeed_restarts_before.results | map(attribute='status.NRestarts') | list
+                  - librespeed_restarts_after.results | map(attribute='status.ActiveState') | unique | list == ['active']
+                fail_msg: >-
+                  A service restarted while it was supposedly up, so `active` was hiding a crash loop.
+                  Before:
+                  {% for unit, restarts in librespeed_verify_units | zip(librespeed_restarts_before.results | map(attribute='status.NRestarts')) %}{{ restarts }} ({{ unit }}){% if not loop.last %}, {% endif %}{% endfor %},
+                  after:
+                  {% for unit, restarts in librespeed_verify_units | zip(librespeed_restarts_after.results | map(attribute='status.NRestarts')) %}{{ restarts }} ({{ unit }}){% if not loop.last %}, {% endif %}{% endfor %}
+                success_msg: >-
+                  None of the services restarted over 45 seconds of watching (restarts so far:
+                  {% for unit, restarts in librespeed_verify_units | zip(librespeed_restarts_after.results | map(attribute='status.NRestarts')) %}{{ restarts }} ({{ unit }}){% if not loop.last %}, {% endif %}{% endfor %})
+
+      rescue:
+        # Whatever went wrong, the reason is almost always in the systemd service log.
+        - name: Retrieve the LibreSpeed systemd service log
+          ansible.builtin.command:
+            cmd: journalctl --no-pager --output=cat --unit=librespeed.service
+          register: librespeed_service_log
+          changed_when: false
+
+        - name: Show the LibreSpeed systemd service log
+          ansible.builtin.debug:
+            var: librespeed_service_log.stdout_lines
+
+        - name: Fail because verification did not pass
+          ansible.builtin.fail:
+            msg: "LibreSpeed verification failed. The systemd service log is printed above."
